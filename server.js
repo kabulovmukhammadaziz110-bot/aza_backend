@@ -52,7 +52,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-const CATEGORIES = ["rifle","sniper","pistol","smg","shotgun","knife"];
+const CATEGORIES = ["rifle","sniper","pistol","smg","shotgun","knife","gloves","agent"];
 
 // ---------- Supabase (Postgres via REST) helpers ----------
 async function sb(path, options = {}){
