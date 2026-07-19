@@ -1,40 +1,43 @@
 /**
- * AZA — backend with a shared skin market (managed from your Telegram bot AND
- * from the site's admin panel) plus the order-confirmation flow.
+ * AZA — backend with a shared skin market stored in Supabase (persists forever,
+ * survives Render restarts/redeploys) managed from your Telegram bot AND from
+ * the site's admin panel, plus the order-confirmation flow.
  *
  * ── Setup ────────────────────────────────────────────────────────────────────
- * 1. A .env file with your BOT_TOKEN, ADMIN_CHAT_ID, ADMIN_TOKEN and PORT should
- *    sit next to this file (already created for you — never share it, add it to
- *    .gitignore, and don't paste real tokens in chat again — rotate any token
- *    that's ever been shared this way via @BotFather > your bot > API Token >
- *    Revoke current token).
- * 2. Deploy this file somewhere with HTTPS (Render, Railway, Fly.io, a VPS...).
- * 3. Set the webhook once:
+ * 1. A .env file next to this file should contain:
+ *      BOT_TOKEN=...
+ *      ADMIN_CHAT_ID=...
+ *      ADMIN_TOKEN=...
+ *      SUPABASE_URL=https://xxxxxxxx.supabase.co
+ *      SUPABASE_SERVICE_KEY=your service_role / secret key
+ *    Never share this file or paste real keys in chat again.
+ * 2. In Supabase, table "skins" (public schema), RLS disabled, columns:
+ *    weapon text, name text, rarity text, wear text, price text,
+ *    category text, image text (id/created_at are automatic).
+ * 3. Deploy this file somewhere with HTTPS (Render, Railway, Fly.io...), with
+ *    the same env vars set in that host's Environment Variables section.
+ * 4. Set the webhook once:
  *    https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://your-domain.com/webhook
- * 4. In java.js set: const API_BASE = "https://your-domain.com";
- * 5. In @BotFather: /mybots -> your bot -> Bot Settings -> Menu Button -> set your
- *    site's HTTPS URL, so tapping "Start" opens the site as a Telegram Mini App.
+ * 5. In java.js set: const API_BASE = "https://your-domain.com";
  *
  * Install: npm install express node-fetch dotenv
- * Run:     node server.js   (reads BOT_TOKEN / ADMIN_CHAT_ID / ADMIN_TOKEN / PORT from .env)
+ * Run:     node server.js
  *
  * Bot commands (only work when sent from ADMIN_CHAT_ID — everyone else is ignored):
  *   /qoshish    — add a new skin, step by step
  *   /bekor      — cancel the add flow currently in progress
  *   /royxat     — list current skins with their position number
  *   /ochirish N — delete the Nth skin from the last /royxat you sent
+ *   /rasm N link — attach/replace the image on the Nth skin from the last /royxat
  */
 
 require("dotenv").config();
-const fs = require("fs");
 const express = require("express");
 const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
 
-// Allow the site to call this API from any origin (needed since index.html is
-// served separately, e.g. from Live Server on 127.0.0.1:5500 or from Netlify/Vercel).
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-token, ngrok-skip-browser-warning");
@@ -46,19 +49,57 @@ app.use((req, res, next) => {
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const ADMIN_CHAT_ID = String(process.env.ADMIN_CHAT_ID || "");
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-const DB_FILE = "./aza-data.json";
 const CATEGORIES = ["rifle","sniper","pistol","smg","shotgun","knife"];
 
-// ---------- Tiny JSON-file database ----------
-function loadDB(){
-  try{ return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); }
-  catch(e){
-    return { nextSkinId: 1, skins: [] };
-  }
+// ---------- Supabase (Postgres via REST) helpers ----------
+async function sb(path, options = {}){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let data = null;
+  try{ data = text ? JSON.parse(text) : null; }catch(e){ data = text; }
+  if(!res.ok) throw new Error(typeof data === "object" ? JSON.stringify(data) : String(data));
+  return data;
 }
-function saveDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
-let db = loadDB();
+
+async function getSkins(){
+  return sb("skins?select=*&order=id.asc");
+}
+async function addSkin(fields){
+  const row = {
+    weapon: fields.weapon, name: fields.name,
+    rarity: fields.rarity || "consumer", wear: fields.wear || "Field-Tested",
+    price: fields.price, category: CATEGORIES.includes(fields.category) ? fields.category : "rifle",
+    image: fields.image || "",
+  };
+  const inserted = await sb("skins", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify([row]),
+  });
+  return inserted[0];
+}
+async function deleteSkinById(id){
+  await sb(`skins?id=eq.${id}`, { method: "DELETE" });
+}
+async function updateSkinById(id, fields){
+  const updated = await sb(`skins?id=eq.${id}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(fields),
+  });
+  return updated[0];
+}
 
 // ---------- Admin auth for the site's admin panel ----------
 function requireAdmin(req, res, next){
@@ -69,41 +110,29 @@ function requireAdmin(req, res, next){
 }
 
 // ---------- Skin market endpoints ----------
-app.get("/api/skins", (req, res) => res.json(db.skins));
+app.get("/api/skins", async (req, res) => {
+  try{ res.json(await getSkins()); }
+  catch(e){ res.status(500).json({ error: "supabase error", detail: String(e) }); }
+});
 
-app.post("/api/skins", requireAdmin, (req, res) => {
-  const { weapon, name, rarity, wear, price, category, image } = req.body || {};
+app.post("/api/skins", requireAdmin, async (req, res) => {
+  const { weapon, name, price } = req.body || {};
   if(!weapon || !name || !price) return res.status(400).json({ error: "weapon, name, price shart" });
-  const skin = {
-    id: String(db.nextSkinId++), weapon, name,
-    rarity: rarity || "consumer", wear: wear || "Field-Tested", price,
-    category: CATEGORIES.includes(category) ? category : "rifle",
-    image: image || "",
-  };
-  db.skins.push(skin);
-  saveDB(db);
-  res.json(skin);
+  try{ res.json(await addSkin(req.body)); }
+  catch(e){ res.status(500).json({ error: "supabase error", detail: String(e) }); }
 });
 
-app.delete("/api/skins/:id", requireAdmin, (req, res) => {
-  db.skins = db.skins.filter(s => s.id !== req.params.id);
-  saveDB(db);
-  res.json({ ok: true });
+app.delete("/api/skins/:id", requireAdmin, async (req, res) => {
+  try{ await deleteSkinById(req.params.id); res.json({ ok: true }); }
+  catch(e){ res.status(500).json({ error: "supabase error", detail: String(e) }); }
 });
 
-app.put("/api/skins/:id", requireAdmin, (req, res) => {
-  const skin = db.skins.find(s => s.id === req.params.id);
-  if(!skin) return res.status(404).json({ error: "topilmadi" });
-  const { weapon, name, rarity, wear, price, category, image } = req.body || {};
-  if(weapon !== undefined) skin.weapon = weapon;
-  if(name !== undefined) skin.name = name;
-  if(rarity !== undefined) skin.rarity = rarity;
-  if(wear !== undefined) skin.wear = wear;
-  if(price !== undefined) skin.price = price;
-  if(category !== undefined && CATEGORIES.includes(category)) skin.category = category;
-  if(image !== undefined) skin.image = image;
-  saveDB(db);
-  res.json(skin);
+app.put("/api/skins/:id", requireAdmin, async (req, res) => {
+  try{
+    const updated = await updateSkinById(req.params.id, req.body || {});
+    if(!updated) return res.status(404).json({ error: "topilmadi" });
+    res.json(updated);
+  }catch(e){ res.status(500).json({ error: "supabase error", detail: String(e) }); }
 });
 
 // ---------- Orders (checkout -> Telegram approval) ----------
@@ -174,70 +203,68 @@ app.post("/webhook", async (req, res) => {
   const text = (msg.text || "").trim();
   async function send(t){ await tg("sendMessage", { chat_id: ADMIN_CHAT_ID, text: t }); }
 
-  if(text === "/start"){
-    await send("Salom! Bu AZA admin boti.\n/qoshish — yangi skin qo'shish\n/royxat — joriy skinlar\n/ochirish N — o'chirish\n/rasm N <link> — N-skinga rasm qo'shish/almashtirish");
-  } else if(text === "/qoshish"){
-    addFlow = { step: "weapon" };
-    await send("Yangi skin qo'shamiz.\nQurol nomini yozing (masalan: AK-47):");
-  } else if(text === "/bekor"){
-    addFlow = null;
-    await send("Bekor qilindi.");
-  } else if(text === "/royxat"){
-    lastList = db.skins.map(s => s.id);
-    if(!db.skins.length){ await send("Market bo'sh."); }
-    else{
-      const lines = db.skins.map((s,i) => `${i+1}. ${s.weapon} | ${s.name} — ${s.price} [${s.rarity}]`);
-      await send(lines.join("\n") + "\n\nO'chirish uchun: /ochirish <raqam>");
-    }
-  } else if(text.startsWith("/ochirish")){
-    const n = parseInt(text.split(" ")[1], 10);
-    const id = lastList[n - 1];
-    if(!id){ await send("Avval /royxat yuboring, keyin shu ro'yxatdagi raqamni yozing."); }
-    else{
-      db.skins = db.skins.filter(s => s.id !== id);
-      saveDB(db);
-      await send(`O'chirildi: #${n}`);
-    }
-  } else if(text.startsWith("/rasm")){
-    const parts = text.split(" ");
-    const n = parseInt(parts[1], 10);
-    const url = parts.slice(2).join(" ").trim();
-    const id = lastList[n - 1];
-    if(!id){ await send("Avval /royxat yuboring, keyin: /rasm <raqam> <rasm-link>"); }
-    else if(!url){ await send("Rasm linkini ham yozing: /rasm <raqam> <rasm-link>"); }
-    else{
-      const skin = db.skins.find(s => s.id === id);
-      if(skin){ skin.image = url; saveDB(db); await send(`Rasm qo'shildi: #${n} — ${skin.weapon} | ${skin.name}`); }
-      else{ await send("Bu skin topilmadi, /royxat yuboring."); }
-    }
-  } else if(addFlow){
-    const f = addFlow;
-    if(f.step === "weapon"){ f.weapon = text; f.step = "name"; await send("Skin nomini yozing (masalan: Redline):"); }
-    else if(f.step === "name"){ f.name = text; f.step = "rarity"; await send(`Rarity darajasini yozing (${RARITIES.join(", ")}):`); }
-    else if(f.step === "rarity"){
-      if(!RARITIES.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${RARITIES.join(", ")}`); }
-      else{ f.rarity = text; f.step = "wear"; await send(`Wear holatini yozing (${WEARS.join(", ")}):`); }
-    }
-    else if(f.step === "wear"){
-      if(!WEARS.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${WEARS.join(", ")}`); }
-      else{ f.wear = text; f.step = "price"; await send("Narxini yozing (masalan: $42.30):"); }
-    }
-    else if(f.step === "price"){ f.price = text; f.step = "category"; await send(`Turkumini yozing (${CATEGORIES.join(", ")}):`); }
-    else if(f.step === "category"){
-      if(!CATEGORIES.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${CATEGORIES.join(", ")}`); }
-      else{ f.category = text; f.step = "image"; await send("Rasm linkini yuboring (masalan https://...), yoki rasm bo'lmasa '-' deb yozing:"); }
-    }
-    else if(f.step === "image"){
-      const skin = { id: String(db.nextSkinId++), weapon: f.weapon, name: f.name, rarity: f.rarity, wear: f.wear, price: f.price, category: f.category, image: text === "-" ? "" : text };
-      db.skins.push(skin);
-      saveDB(db);
+  try{
+    if(text === "/start"){
+      await send("Salom! Bu AZA admin boti.\n/qoshish — yangi skin qo'shish\n/royxat — joriy skinlar\n/ochirish N — o'chirish\n/rasm N <link> — N-skinga rasm qo'shish/almashtirish");
+    } else if(text === "/qoshish"){
+      addFlow = { step: "weapon" };
+      await send("Yangi skin qo'shamiz.\nQurol nomini yozing (masalan: AK-47):");
+    } else if(text === "/bekor"){
       addFlow = null;
-      await send(`Qo'shildi ✅\n${skin.weapon} | ${skin.name} — ${skin.price}`);
+      await send("Bekor qilindi.");
+    } else if(text === "/royxat"){
+      const skins = await getSkins();
+      lastList = skins.map(s => s.id);
+      if(!skins.length){ await send("Market bo'sh."); }
+      else{
+        const lines = skins.map((s,i) => `${i+1}. ${s.weapon} | ${s.name} — ${s.price} [${s.rarity}]`);
+        await send(lines.join("\n") + "\n\nO'chirish: /ochirish <raqam>\nRasm qo'shish: /rasm <raqam> <link>");
+      }
+    } else if(text.startsWith("/ochirish")){
+      const n = parseInt(text.split(" ")[1], 10);
+      const id = lastList[n - 1];
+      if(!id){ await send("Avval /royxat yuboring, keyin shu ro'yxatdagi raqamni yozing."); }
+      else{ await deleteSkinById(id); await send(`O'chirildi: #${n}`); }
+    } else if(text.startsWith("/rasm")){
+      const parts = text.split(" ");
+      const n = parseInt(parts[1], 10);
+      const url = parts.slice(2).join(" ").trim();
+      const id = lastList[n - 1];
+      if(!id){ await send("Avval /royxat yuboring, keyin: /rasm <raqam> <rasm-link>"); }
+      else if(!url){ await send("Rasm linkini ham yozing: /rasm <raqam> <rasm-link>"); }
+      else{
+        const updated = await updateSkinById(id, { image: url });
+        await send(`Rasm qo'shildi: #${n} — ${updated.weapon} | ${updated.name}`);
+      }
+    } else if(addFlow){
+      const f = addFlow;
+      if(f.step === "weapon"){ f.weapon = text; f.step = "name"; await send("Skin nomini yozing (masalan: Redline):"); }
+      else if(f.step === "name"){ f.name = text; f.step = "rarity"; await send(`Rarity darajasini yozing (${RARITIES.join(", ")}):`); }
+      else if(f.step === "rarity"){
+        if(!RARITIES.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${RARITIES.join(", ")}`); }
+        else{ f.rarity = text; f.step = "wear"; await send(`Wear holatini yozing (${WEARS.join(", ")}):`); }
+      }
+      else if(f.step === "wear"){
+        if(!WEARS.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${WEARS.join(", ")}`); }
+        else{ f.wear = text; f.step = "price"; await send("Narxini yozing (masalan: $42.30):"); }
+      }
+      else if(f.step === "price"){ f.price = text; f.step = "category"; await send(`Turkumini yozing (${CATEGORIES.join(", ")}):`); }
+      else if(f.step === "category"){
+        if(!CATEGORIES.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${CATEGORIES.join(", ")}`); }
+        else{ f.category = text; f.step = "image"; await send("Rasm linkini yuboring (masalan https://...), yoki rasm bo'lmasa '-' deb yozing:"); }
+      }
+      else if(f.step === "image"){
+        const skin = await addSkin({ ...f, image: text === "-" ? "" : text });
+        addFlow = null;
+        await send(`Qo'shildi ✅\n${skin.weapon} | ${skin.name} — ${skin.price}`);
+      }
     }
+  }catch(e){
+    await send("Xatolik yuz berdi: " + String(e).slice(0, 300));
   }
 
   res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`AZA backend v3 (trade-url/telegram delivery fields) ${PORT}-portda ishlamoqda`));
+app.listen(PORT, () => console.log(`AZA backend v4 (Supabase) ${PORT}-portda ishlamoqda`));
