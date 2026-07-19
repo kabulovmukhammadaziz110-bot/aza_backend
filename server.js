@@ -54,14 +54,7 @@ const CATEGORIES = ["rifle","sniper","pistol","smg","shotgun","knife"];
 function loadDB(){
   try{ return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); }
   catch(e){
-    return {
-      nextSkinId: 4,
-      skins: [
-        {id:"1", weapon:"AK-47", name:"Redline", rarity:"classified", wear:"Field-Tested", price:"$42.30", category:"rifle"},
-        {id:"2", weapon:"AWP", name:"Asiimov", rarity:"covert", wear:"Battle-Scarred", price:"$118.00", category:"sniper"},
-        {id:"3", weapon:"Karambit", name:"Doppler", rarity:"gold", wear:"Factory New", price:"$620.00", category:"knife"},
-      ],
-    };
+    return { nextSkinId: 1, skins: [] };
   }
 }
 function saveDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
