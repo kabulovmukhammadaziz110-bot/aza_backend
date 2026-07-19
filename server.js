@@ -38,7 +38,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-token, ngrok-skip-browser-warning");
-  res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   if(req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -79,12 +79,13 @@ function requireAdmin(req, res, next){
 app.get("/api/skins", (req, res) => res.json(db.skins));
 
 app.post("/api/skins", requireAdmin, (req, res) => {
-  const { weapon, name, rarity, wear, price, category } = req.body || {};
+  const { weapon, name, rarity, wear, price, category, image } = req.body || {};
   if(!weapon || !name || !price) return res.status(400).json({ error: "weapon, name, price shart" });
   const skin = {
     id: String(db.nextSkinId++), weapon, name,
     rarity: rarity || "consumer", wear: wear || "Field-Tested", price,
     category: CATEGORIES.includes(category) ? category : "rifle",
+    image: image || "",
   };
   db.skins.push(skin);
   saveDB(db);
@@ -95,6 +96,21 @@ app.delete("/api/skins/:id", requireAdmin, (req, res) => {
   db.skins = db.skins.filter(s => s.id !== req.params.id);
   saveDB(db);
   res.json({ ok: true });
+});
+
+app.put("/api/skins/:id", requireAdmin, (req, res) => {
+  const skin = db.skins.find(s => s.id === req.params.id);
+  if(!skin) return res.status(404).json({ error: "topilmadi" });
+  const { weapon, name, rarity, wear, price, category, image } = req.body || {};
+  if(weapon !== undefined) skin.weapon = weapon;
+  if(name !== undefined) skin.name = name;
+  if(rarity !== undefined) skin.rarity = rarity;
+  if(wear !== undefined) skin.wear = wear;
+  if(price !== undefined) skin.price = price;
+  if(category !== undefined && CATEGORIES.includes(category)) skin.category = category;
+  if(image !== undefined) skin.image = image;
+  saveDB(db);
+  res.json(skin);
 });
 
 // ---------- Orders (checkout -> Telegram approval) ----------
@@ -110,15 +126,20 @@ async function tg(method, payload){
 }
 
 app.post("/api/order", async (req, res) => {
-  const { product, price } = req.body || {};
+  const { product, price, tradeUrl, telegramUsername, telegramId } = req.body || {};
   if(!product || !price) return res.status(400).json({ error: "product va price shart" });
 
   const id = String(nextOrderId++);
   orders.set(id, { id, product, price, status: "pending" });
 
+  let deliveryLines = "";
+  if(tradeUrl) deliveryLines += `\nSteam Trade URL: ${tradeUrl}`;
+  if(telegramUsername) deliveryLines += `\nTelegram (Premium): ${telegramUsername}`;
+  if(telegramId) deliveryLines += `\nTelegram (Stars): ${telegramId}`;
+
   await tg("sendMessage", {
     chat_id: ADMIN_CHAT_ID,
-    text: `🆕 Yangi buyurtma #${id}\nMahsulot: ${product}\nNarxi: ${price}\n\nXaridor to'lov qilganini tasdiqladi. Kartani tekshirib javob bering.`,
+    text: `🆕 Yangi buyurtma #${id}\nMahsulot: ${product}\nNarxi: ${price}${deliveryLines}\n\nXaridor to'lov qilganini tasdiqladi. Kartani tekshirib javob bering.`,
     reply_markup: { inline_keyboard: [[
       { text: "✅ Tasdiqlash", callback_data: `confirm:${id}` },
       { text: "❌ Bekor qilish", callback_data: `reject:${id}` },
@@ -161,7 +182,7 @@ app.post("/webhook", async (req, res) => {
   async function send(t){ await tg("sendMessage", { chat_id: ADMIN_CHAT_ID, text: t }); }
 
   if(text === "/start"){
-    await send("Salom! Bu AZA admin boti.\n/qoshish — yangi skin qo'shish\n/royxat — joriy skinlar\n/ochirish N — o'chirish");
+    await send("Salom! Bu AZA admin boti.\n/qoshish — yangi skin qo'shish\n/royxat — joriy skinlar\n/ochirish N — o'chirish\n/rasm N <link> — N-skinga rasm qo'shish/almashtirish");
   } else if(text === "/qoshish"){
     addFlow = { step: "weapon" };
     await send("Yangi skin qo'shamiz.\nQurol nomini yozing (masalan: AK-47):");
@@ -184,6 +205,18 @@ app.post("/webhook", async (req, res) => {
       saveDB(db);
       await send(`O'chirildi: #${n}`);
     }
+  } else if(text.startsWith("/rasm")){
+    const parts = text.split(" ");
+    const n = parseInt(parts[1], 10);
+    const url = parts.slice(2).join(" ").trim();
+    const id = lastList[n - 1];
+    if(!id){ await send("Avval /royxat yuboring, keyin: /rasm <raqam> <rasm-link>"); }
+    else if(!url){ await send("Rasm linkini ham yozing: /rasm <raqam> <rasm-link>"); }
+    else{
+      const skin = db.skins.find(s => s.id === id);
+      if(skin){ skin.image = url; saveDB(db); await send(`Rasm qo'shildi: #${n} — ${skin.weapon} | ${skin.name}`); }
+      else{ await send("Bu skin topilmadi, /royxat yuboring."); }
+    }
   } else if(addFlow){
     const f = addFlow;
     if(f.step === "weapon"){ f.weapon = text; f.step = "name"; await send("Skin nomini yozing (masalan: Redline):"); }
@@ -199,13 +232,14 @@ app.post("/webhook", async (req, res) => {
     else if(f.step === "price"){ f.price = text; f.step = "category"; await send(`Turkumini yozing (${CATEGORIES.join(", ")}):`); }
     else if(f.step === "category"){
       if(!CATEGORIES.includes(text)){ await send(`Noto'g'ri. Quyidagilardan birini yozing: ${CATEGORIES.join(", ")}`); }
-      else{
-        const skin = { id: String(db.nextSkinId++), weapon: f.weapon, name: f.name, rarity: f.rarity, wear: f.wear, price: f.price, category: text };
-        db.skins.push(skin);
-        saveDB(db);
-        addFlow = null;
-        await send(`Qo'shildi ✅\n${skin.weapon} | ${skin.name} — ${skin.price}`);
-      }
+      else{ f.category = text; f.step = "image"; await send("Rasm linkini yuboring (masalan https://...), yoki rasm bo'lmasa '-' deb yozing:"); }
+    }
+    else if(f.step === "image"){
+      const skin = { id: String(db.nextSkinId++), weapon: f.weapon, name: f.name, rarity: f.rarity, wear: f.wear, price: f.price, category: f.category, image: text === "-" ? "" : text };
+      db.skins.push(skin);
+      saveDB(db);
+      addFlow = null;
+      await send(`Qo'shildi ✅\n${skin.weapon} | ${skin.name} — ${skin.price}`);
     }
   }
 
@@ -213,4 +247,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`AZA backend ${PORT}-portda ishlamoqda`));
+app.listen(PORT, () => console.log(`AZA backend v3 (trade-url/telegram delivery fields) ${PORT}-portda ishlamoqda`));
