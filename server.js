@@ -80,7 +80,7 @@ async function addSkin(fields){
     weapon: fields.weapon, name: fields.name,
     rarity: fields.rarity || "consumer", wear: fields.wear || "Field-Tested",
     price: fields.price, category: CATEGORIES.includes(fields.category) ? fields.category : "rifle",
-    image: fields.image || "", float: fields.float || "",
+    image: fields.image || "",
   };
   const inserted = await sb("skins", {
     method: "POST",
@@ -254,12 +254,7 @@ app.post("/webhook", async (req, res) => {
         else{ f.category = text; f.step = "image"; await send("Rasm linkini yuboring (masalan https://...), yoki rasm bo'lmasa '-' deb yozing:"); }
       }
       else if(f.step === "image"){
-        f.image = text === "-" ? "" : text;
-        f.step = "float";
-        await send("Float qiymatini yozing (masalan 0.03), yoki bo'lmasa '-' deb yozing:");
-      }
-      else if(f.step === "float"){
-        const skin = await addSkin({ ...f, float: text === "-" ? "" : text });
+        const skin = await addSkin({ ...f, image: text === "-" ? "" : text });
         addFlow = null;
         await send(`Qo'shildi ✅\n${skin.weapon} | ${skin.name} — ${skin.price}`);
       }
