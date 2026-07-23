@@ -148,7 +148,7 @@ async function tg(method, payload){
 }
 
 app.post("/api/order", async (req, res) => {
-  const { product, price, tradeUrl, telegramUsername, telegramId } = req.body || {};
+  const { product, price, tradeUrl, telegramUsername, telegramId, pubgId, fcLogin, fcPassword } = req.body || {};
   if(!product || !price) return res.status(400).json({ error: "product va price shart" });
 
   const id = String(nextOrderId++);
@@ -158,6 +158,9 @@ app.post("/api/order", async (req, res) => {
   if(tradeUrl) deliveryLines += `\nSteam Trade URL: ${tradeUrl}`;
   if(telegramUsername) deliveryLines += `\nTelegram (Premium): ${telegramUsername}`;
   if(telegramId) deliveryLines += `\nTelegram (Stars): ${telegramId}`;
+  if(pubgId) deliveryLines += `\nPUBG Player ID: ${pubgId}`;
+  if(fcLogin) deliveryLines += `\nFC Mobile login: ${fcLogin}`;
+  if(fcPassword) deliveryLines += `\nFC Mobile parol: ${fcPassword}`;
 
   await tg("sendMessage", {
     chat_id: ADMIN_CHAT_ID,
